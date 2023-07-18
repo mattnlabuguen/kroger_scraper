@@ -189,32 +189,17 @@ def write_to_file(file_path: str, data: list, mode: str = 'w'):
             writer.writerow(data)
 
 
-def extract_csv_data(input_file: str = 'input/USZipCodesXLS.csv',
+def extract_csv_data(state_filter: list, input_file: str = 'input/USZipCodesXLS.csv',
                      output_file: str = 'output/Kroger-US-Full.csv') -> dict:
     input_df = pd.read_csv(input_file)
     output_df = pd.read_csv(output_file)
     existing_postal_codes = output_df['ZipCode'].to_list()
 
-    csv_data = input_df[~input_df['ID'].isin(existing_postal_codes)].to_dict(orient='records')
+    csv_data = input_df[((~input_df['ID'].isin(existing_postal_codes))
+                         & (input_df['RG_NAME'].isin(state_filter)))].to_dict(orient='records')
     print(f'{len(existing_postal_codes)} postal codes filtered out')
 
     return csv_data
-
-    # states = df['RG_NAME'].unique().tolist()
-    # existing_postal_codes = []
-    #
-    # for state in states:
-    #     state_file = f'output/{state}.csv'
-    #     state_path = os.path.expanduser(f'{state_file}')
-    #     if os.path.exists(state_path):
-    #         state_df = pd.read_csv(state_file)
-    #         existing_postal_codes.extend(state_df['ZipCode'].to_list())
-    #
-    # df = df[~df['ID'].isin(existing_postal_codes)]  # Filter out postal codes that have finished
-    # print(f'{len(existing_postal_codes)} postal codes filtered out')
-    #
-    # grouped_data_by_state = df.groupby('RG_NAME').apply(lambda x: x.to_dict('records')).to_dict()
-    # return grouped_data_by_state
 
 
 def process_data(details: dict, output_file: str = 'output/Kroger-US-Full.csv'):
@@ -245,7 +230,7 @@ def initialize_output_file(filename: str = 'output/Kroger-US-Full.csv'):
 
 def main():
     initialize_output_file()
-    csv_data = extract_csv_data()
+    csv_data = extract_csv_data(state_filter=['Hawaii'])  # Add filter option to specify which states to scrape.
 
     with ThreadPoolExecutor(max_workers=12) as executor:
         for row in csv_data:
