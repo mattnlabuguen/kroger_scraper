@@ -93,32 +93,26 @@ def transform_data(details: dict, raw_data: str) -> List[KrogerData]:
         'CityName': details.get('NAME', None),
         'StateAbbrev': details.get('RG_ABBREV', None),
         'ZipCode': details.get('ID', None),
+        'Delivery': 'No',  # By default, set value to No.
+        'DeliveryGrocery': [],
+        'DeliveryRestaurants': [],
+        'DeliveryAll': [],
+        'Pickup': 'No',  # By default, set value to No.
+        'PickupGrocery': [],
+        'PickupRestaurants': [],
+        'PickupAll': [],
     }
 
     try:
         json_data = json.loads(raw_data)
-        if 'data' in json_data and 'modalityOptions' in json_data['data']:
-            modality_options = json_data['data']['modalityOptions']
-            to_check = ['DELIVERY', 'PICKUP']
+        if 'data' in json_data:
+            if 'modalityOptions' in json_data['data']:
+                modality_options = json_data['data']['modalityOptions']
+                data = check_modality_options(data, modality_options)
 
-            for option in to_check:
-                if option in modality_options and modality_options[option]:
-                    data[option.capitalize()] = 'Yes'
-                else:
-                    data[option.capitalize()] = 'No'
-
-        elif 'errors' in json_data:
-            data['Delivery'] = 'No'
-            data['Pickup'] = 'No'
-
-        data.update({
-            'DeliveryGrocery': ['Kroger'] if data['Delivery'] == 'Yes' else [],
-            'DeliveryRestaurants': [],
-            'DeliveryAll': ['Kroger'] if data['Delivery'] == 'Yes' else [],
-            'PickupGrocery': ['Kroger'] if data['Pickup'] == 'Yes' else [],
-            'PickupRestaurants': [],
-            'PickupAll': ['Kroger'] if data['Pickup'] == 'Yes' else []
-        })
+                if 'storeDetails' in modality_options:
+                    store_details = modality_options['storeDetails']
+                    data = get_modality_brands(data, store_details)
 
         return list(data.values())
 
@@ -130,6 +124,64 @@ def transform_data(details: dict, raw_data: str) -> List[KrogerData]:
         logging.error(f'transform_data() error: {str(e)}')
 
 
+def check_modality_options(data: dict, modality_options: dict) -> dict:
+    options_to_check = ['DELIVERY', 'PICKUP']
+    for option in options_to_check:
+        if option in modality_options and modality_options[option]:
+            data[option.capitalize()] = 'Yes'
+        else:
+            data[option.capitalize()] = 'No'
+
+    return data
+
+
+def get_modality_brands(data: dict, store_details: dict) -> dict:
+    kroger_brand_list = [
+        'Baker’s', 'City Market', 'Dillons', 'Food 4 Less', 'Foods Co', 'Fred Meyer', 'Fry’s',
+        'Gerbes', 'Harris Teeter', 'Jay C Food Store', 'King Soopers', 'Kroger', 'Mariano’s',
+        'Metro Market', 'Pay-Less Super Markets', 'Pick’n Save', 'QFC', 'Ralphs', 'Ruler',
+        'Smith’s Food and Drug'
+    ]
+
+    if data['Pickup'] == 'Yes':
+        for store in store_details:
+            if 'PICKUP' in store['allowedModalities']:
+                banner = store['banner']
+                highest_similarity = 0
+                closest_brand = None
+
+                for brand in kroger_brand_list:
+                    similarity = jaccard_similarity(banner, brand)
+                    if similarity > highest_similarity:
+                        highest_similarity = similarity
+                        closest_brand = brand
+
+                if closest_brand:
+                    if closest_brand not in data['PickupGrocery']:
+                        data['PickupGrocery'].append(closest_brand)
+
+                    if closest_brand not in data['PickupAll']:
+                        data['PickupAll'].append(closest_brand)
+
+    return data
+
+
+def jaccard_similarity(s1: str, s2: str) -> float:
+    """
+    This method takes the measure of similarity between two strings by converting them into sets.
+    :param s2: String to be compared to s1 to check how similar they are to each other.
+    :param s1: String to be compared to s2 to check how similar they are to each other.
+    :return: Returns a float value that determines how similar both strings are.
+    """
+    set1 = set(s1)
+    set2 = set(s2)
+
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+
+    return intersection / union
+
+
 def write_to_file(file_path: str, data: list, mode: str = 'w'):
     with lock:
         with open(file_path, mode, newline='') as file:
@@ -137,15 +189,16 @@ def write_to_file(file_path: str, data: list, mode: str = 'w'):
             writer.writerow(data)
 
 
-def extract_csv_data(input_file: str = 'input/USZipCodesXLS.csv', output_file: str = 'output/Kroger-US-Full.csv'):
+def extract_csv_data(input_file: str = 'input/USZipCodesXLS.csv',
+                     output_file: str = 'output/Kroger-US-Full.csv') -> dict:
     input_df = pd.read_csv(input_file)
     output_df = pd.read_csv(output_file)
     existing_postal_codes = output_df['ZipCode'].to_list()
 
-    df = input_df[~input_df['ID'].isin(existing_postal_codes)].to_dict(orient='records')
+    csv_data = input_df[~input_df['ID'].isin(existing_postal_codes)].to_dict(orient='records')
     print(f'{len(existing_postal_codes)} postal codes filtered out')
 
-    return df
+    return csv_data
 
     # states = df['RG_NAME'].unique().tolist()
     # existing_postal_codes = []
@@ -164,13 +217,13 @@ def extract_csv_data(input_file: str = 'input/USZipCodesXLS.csv', output_file: s
     # return grouped_data_by_state
 
 
-def process_data(details: dict):
+def process_data(details: dict, output_file: str = 'output/Kroger-US-Full.csv'):
     postal_code = postal_code_formatter(details.get('ID', None))
     raw_data = download_data(postal_code)
 
     if raw_data:
         data = transform_data(details, raw_data)
-        write_to_file(f'output/Kroger-US-Full.csv', data, 'a')
+        write_to_file(output_file, data, 'a')
         print(f"Written to file: {postal_code}")
 
         delay = random.randint(5, 15)
@@ -196,8 +249,21 @@ def main():
 
     with ThreadPoolExecutor(max_workers=12) as executor:
         for row in csv_data:
-            executor.submit(process_data, row)
+            executor.submit(process_data, row, 'output/Kroger-US-Full.csv')
             time.sleep(random.randint(1, 3))
+
+
+def test():
+    initialize_output_file('output/test_output.csv')
+    test_row = {
+        'OBJECTID': 11212,
+        'ID': 36804,
+        'NAME': 'Opelika',
+        'RG_NAME': 'Alabama	',
+        'RG_ABBREV': 'AL',
+    }
+
+    process_data(test_row, 'output/test_output.csv')
 
 
 if __name__ == '__main__':
