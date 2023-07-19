@@ -1,6 +1,5 @@
 import csv
 import json
-import logging
 import os
 import random
 import requests
@@ -8,248 +7,233 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date
-from dataclasses import dataclass
-from typing import List
+from logging import Logger
 
 import pandas as pd
 from fake_useragent import UserAgent
-from win10toast import ToastNotifier
 
-# Lock for synchronization
+from logger import initialize_logger
+
 lock = threading.Lock()
-logging.basicConfig(filename=f'logs/{date.today()}.txt', level=logging.ERROR, datefmt='%Y-%m-%d %H:%M:%S',
-                    format='%(asctime)s %(levelname)-8s %(message)s')
+max_retries = 3
+max_workers = 12
+retry_delay_range = (5, 15)
+worker_delay_range = (1, 3)
+timeout_range = (10, 100)
 user_agent = UserAgent(browsers=['edge', 'chrome', 'safari'])
-toaster = ToastNotifier()
+output_columns = ['Ecommerce', 'CityName', 'StateAbbrev', 'ZipCode', 'Delivery',
+                  'DeliveryGrocery', 'DeliveryRestaurants', 'DeliveryAll', 'Pickup',
+                  'PickupGrocery', 'PickupRestaurants', 'PickupAll']
+state_list = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut',
+              'Delaware', 'District of Columbia', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois',
+              'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts',
+              'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
+              'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota',
+              'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina',
+              'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington',
+              'West Virginia', 'Wisconsin', 'Wyoming']
 
 
-@dataclass
-class KrogerData:
-    Ecommerce: str
-    CityName: str
-    StateAbbrev: str
-    ZipCode: str
-    Delivery: str
-    DeliveryGrocery: list
-    DeliveryRestaurants: list
-    DeliveryAll: list
-    Pickup: str
-    PickupGrocery: list
-    PickupRestaurants: list
-    PickupAll: list
+class KrogerScraper:
+    def __init__(self, postal_code_input, store_input, output_file, kroger_logger):
+        self.postal_code_data = pd.read_csv(postal_code_input)
+        self.store_data = pd.read_csv(store_input, encoding='ISO-8859-1')
+        self.output_file = output_file
+        self.logger = kroger_logger
 
-
-def postal_code_formatter(code: int) -> str:
-    postal_code = str(code)
-    if len(postal_code) == 4:  # Prepend 0 to postal codes with only 4 digits.
-        postal_code = f'0{code}'
-
-    return postal_code
-
-
-def download_data(postal_code: str) -> str:
-    try:
-        api_url = 'https://www.kroger.com/atlas/v1/modality/options'
-        default_headers = {
+        self.api_url = 'https://www.kroger.com/atlas/v1/modality/options'
+        self.headers = {
             'authority': 'www.kroger.com',
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'en-US,en;q=0.9',
             'content-type': 'application/json',
             'origin': 'https://www.kroger.com',
-            'referer': 'https://www.kroger.com/',
-            'user-agent': user_agent.random
+            'referer': 'https://www.kroger.com/'
         }
-        payload = {
-            'address': {
-                'postalCode': postal_code
-            }
+
+        # Setup default directories for output and log files.
+        default_directories = ['output', 'logs']
+        for directory in default_directories:
+            if not os.path.exists(directory):
+                os.mkdir(directory)
+
+                if directory == 'output':
+                    self.initialize_output_file()
+
+    def run(self):
+        filtered_postal_code_list = self.filter_postal_codes()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for postal_code_details in filtered_postal_code_list:
+                executor.submit(self.process_postal_code, postal_code_details)
+                worker_delay = random.randint(worker_delay_range[0], worker_delay_range[1])
+                time.sleep(worker_delay)
+
+    def test(self, postal_code: int = None):
+        if postal_code:  # For testing individual postal codes.
+            postal_df = self.postal_code_data
+            postal_code_details = postal_df.loc[postal_df['ID'] == postal_code].to_dict(orient='records')[0]
+            self.process_postal_code(postal_code_details)
+        else:
+            filtered_postal_code_list = self.filter_postal_codes(state_filter=['California'])
+            for postal_code_details in filtered_postal_code_list:
+                self.process_postal_code(postal_code_details)
+
+    def initialize_output_file(self):
+        initial_file = pd.DataFrame(columns=output_columns)
+        initial_file.to_csv(self.output_file, mode='w', index=False)
+
+    def process_postal_code(self, postal_code_details: dict):
+        postal_code = self.postal_code_formatter(postal_code_details.get('ID', None))
+        kroger_postal_data = self.download_data(postal_code)
+
+        if kroger_postal_data:
+            transformed_data = self.transform_data(kroger_postal_data, postal_code_details)
+            self.write_to_file(self.output_file, transformed_data, 'a')
+
+            delay = random.randint(5, 15)
+            self.logger.info(f'Delaying for {delay} seconds.')
+            time.sleep(delay)
+
+    def filter_postal_codes(self, state_filter=None) -> dict:
+        postal_code_data = self.postal_code_data
+        if state_filter is None or not state_filter:
+            state_filter = state_list
+
+        output_df = pd.read_csv(self.output_file)
+        existing_postal_codes = output_df['ZipCode'].to_list()
+
+        filtered_data = postal_code_data[(
+                (~postal_code_data['ID'].isin(existing_postal_codes)) &  # Filter out any already existing postal code.
+                (postal_code_data['RG_NAME'].isin(state_filter))  # Filter out states not specified in the list.
+        )].to_dict(orient='records')
+
+        self.logger.info(f'{len(existing_postal_codes)} postal codes filtered out')
+        return filtered_data
+
+    def download_data(self, postal_code: str, retries: int = 0) -> dict:
+        payload = {'address': {'postalCode': postal_code}}
+        kroger_postal_data = None
+
+        try:
+            self.headers['User-Agent'] = user_agent.random  # Randomize user agent per request
+            response = requests.post(self.api_url, timeout=random.randint(timeout_range[0], timeout_range[1]),
+                                     headers=self.headers, data=json.dumps(payload))
+            response.raise_for_status()
+            kroger_postal_data = response.json()
+            self.logger.info(f'Request success for postal code {postal_code}')
+
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f'Request failed for postal code {postal_code}: {str(e)}')
+            if 'Client Error' in str(e):
+                # A status code of 400 may indicate that the postal code is invalid, or simply unaccounted for by Kroger
+                kroger_postal_data = {'errors': None}
+
+            elif retries < max_retries:
+                retry_delay = random.randint(retry_delay_range[0], retry_delay_range[1])
+                self.logger.info(f'Delaying by {retry_delay} seconds before retrying for postal code {postal_code}')
+                time.sleep(retry_delay)
+                kroger_postal_data = self.download_data(postal_code, retries + 1)
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f'Error while processing postal code {postal_code}: {str(e)}')
+
+        except requests.exceptions.JSONDecodeError as e:
+            self.logger.error(f'Data returned by postal code {postal_code} does not contain valid JSON: {str(e)}')
+
+        finally:
+            return kroger_postal_data
+
+    def transform_data(self, kroger_postal_data: dict, postal_code_details: dict) -> list:
+        output_data = {
+            'Ecommerce': 'Kroger',
+            'CityName': postal_code_details.get('NAME', None),
+            'StateAbbrev': postal_code_details.get('RG_ABBREV', None),
+            'ZipCode': postal_code_details.get('ID', None),
+            'Delivery': 'No',  # By default, set value to No.
+            'DeliveryGrocery': [],
+            'DeliveryRestaurants': [],
+            'DeliveryAll': [],
+            'Pickup': 'No',  # By default, set value to No.
+            'PickupGrocery': [],
+            'PickupRestaurants': [],
+            'PickupAll': [],
         }
-        status_code = None
-        response = requests.post(api_url, timeout=random.randint(10, 100), headers=default_headers,
-                                 data=json.dumps(payload))
-        if response:
-            raw_data = response.text
-            status_code = response.status_code
 
-            if response.ok or response.status_code in [200, 201]:
-                print(f"Download success: {postal_code}")
-            elif status_code == 400:
-                invalid_msg = f"Postal code is invalid - {postal_code}"
-                logging.error(invalid_msg)
-                raise Exception(invalid_msg)
+        if 'data' in kroger_postal_data:
+            if 'modalityOptions' in kroger_postal_data['data']:
+                modality_options = kroger_postal_data['data']['modalityOptions']
+                output_data.update(self.check_modality_options(modality_options))
 
-            return raw_data
-        else:
-            toaster.show_toast('Download data error', 'Download failure exception', duration=3)
-            raise Exception(f'Download failure exception')
+                if output_data['Delivery'] == 'Yes':
+                    delivery_store_brands = self.get_store_brands(modality_options, 'Delivery')
+                    output_data.update(dict.fromkeys(['DeliveryGrocery', 'DeliveryAll'], delivery_store_brands))
 
-    except Exception as e:
-        logging.error(str(f'download_data() error: {str(e)} - {postal_code}'))
+                if output_data['Pickup'] == 'Yes':
+                    pickup_store_brands = self.get_store_brands(modality_options, 'Pickup')
+                    output_data.update(dict.fromkeys(['PickupGrocery', 'PickupAll'], pickup_store_brands))
 
+        return list(output_data.values())
 
-def transform_data(details: dict, raw_data: str) -> List[KrogerData]:
-    data = {
-        'Ecommerce': 'Kroger',
-        'CityName': details.get('NAME', None),
-        'StateAbbrev': details.get('RG_ABBREV', None),
-        'ZipCode': details.get('ID', None),
-        'Delivery': 'No',  # By default, set value to No.
-        'DeliveryGrocery': [],
-        'DeliveryRestaurants': [],
-        'DeliveryAll': [],
-        'Pickup': 'No',  # By default, set value to No.
-        'PickupGrocery': [],
-        'PickupRestaurants': [],
-        'PickupAll': [],
-    }
+    def get_store_brands(self, modality_options: dict, mode: str) -> list:
+        store_brands = []
+        store_ids = []
+        store_df = self.store_data
 
-    try:
-        json_data = json.loads(raw_data)
-        if 'data' in json_data:
-            if 'modalityOptions' in json_data['data']:
-                modality_options = json_data['data']['modalityOptions']
-                data = check_modality_options(data, modality_options)
+        if mode == 'Delivery':
+            if 'fulfillment' in modality_options['DELIVERY']:
+                store_ids = modality_options['DELIVERY']['fulfillment']
+        elif mode == 'Pickup':
+            if 'storeDetails' in modality_options:
+                store_details = modality_options['storeDetails']
+                store_ids = [store['locationId'] for store in store_details]
 
-                if 'storeDetails' in modality_options:
-                    store_details = modality_options['storeDetails']
-                    data = get_modality_brands(data, store_details)
+        for store_id in store_ids:
+            try:
+                store_df['StoreNumber'] = store_df['StoreNumber'].str.replace('-', '').astype(str)
+                brand = store_df.loc[store_df['StoreNumber'] == store_id, 'ChainName'].iloc[0]
+                if brand not in store_brands:
+                    store_brands.append(brand)
+            except IndexError as e:
+                self.logger.error(f'Store with ID: {store_id} is not on the list.')
+                pass
 
-        return list(data.values())
+        return store_brands
 
-    except json.decoder.JSONDecodeError:
-        toaster.show_toast('Error', 'JSON Decode Error', duration=3)
-        logging.error('transform_data() error: Downloaded data could not be parsed into JSON format')
-    except Exception as e:
-        toaster.show_toast('Transform data error', str(e), duration=3)
-        logging.error(f'transform_data() error: {str(e)}')
+    @staticmethod
+    def check_modality_options(modality_options: dict) -> dict:
+        data = {}
+        options_to_check = ['DELIVERY', 'PICKUP']
+        for option in options_to_check:
+            if option in modality_options and modality_options[option]:
+                data[option.capitalize()] = 'Yes'
+            else:
+                data[option.capitalize()] = 'No'
 
+        return data
 
-def check_modality_options(data: dict, modality_options: dict) -> dict:
-    options_to_check = ['DELIVERY', 'PICKUP']
-    for option in options_to_check:
-        if option in modality_options and modality_options[option]:
-            data[option.capitalize()] = 'Yes'
-        else:
-            data[option.capitalize()] = 'No'
+    @staticmethod
+    def write_to_file(output_file: str, data: list, mode: str = 'a'):
+        with lock:
+            with open(output_file, mode, newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(data)
 
-    return data
+    @staticmethod
+    def postal_code_formatter(code: int) -> str:
+        postal_code = str(code)
+        if len(postal_code) == 4:  # Prepend 0 to postal codes with only 4 digits.
+            postal_code = f'0{code}'
 
-
-def get_modality_brands(data: dict, store_details: dict) -> dict:
-    kroger_brand_list = [
-        'Baker’s', 'City Market', 'Dillons', 'Food 4 Less', 'Foods Co', 'Fred Meyer', 'Fry’s',
-        'Gerbes', 'Harris Teeter', 'Jay C Food Store', 'King Soopers', 'Kroger', 'Mariano’s',
-        'Metro Market', 'Pay-Less Super Markets', 'Pick’n Save', 'QFC', 'Ralphs', 'Ruler',
-        'Smith’s Food and Drug'
-    ]
-
-    if data['Pickup'] == 'Yes':
-        for store in store_details:
-            if 'PICKUP' in store['allowedModalities']:
-                banner = store['banner']
-                highest_similarity = 0
-                closest_brand = None
-
-                for brand in kroger_brand_list:
-                    similarity = jaccard_similarity(banner, brand)
-                    if similarity > highest_similarity:
-                        highest_similarity = similarity
-                        closest_brand = brand
-
-                if closest_brand:
-                    if closest_brand not in data['PickupGrocery']:
-                        data['PickupGrocery'].append(closest_brand)
-
-                    if closest_brand not in data['PickupAll']:
-                        data['PickupAll'].append(closest_brand)
-
-    return data
-
-
-def jaccard_similarity(s1: str, s2: str) -> float:
-    """
-    This method takes the measure of similarity between two strings by converting them into sets.
-    :param s2: String to be compared to s1 to check how similar they are to each other.
-    :param s1: String to be compared to s2 to check how similar they are to each other.
-    :return: Returns a float value that determines how similar both strings are.
-    """
-    set1 = set(s1)
-    set2 = set(s2)
-
-    intersection = len(set1.intersection(set2))
-    union = len(set1.union(set2))
-
-    return intersection / union
-
-
-def write_to_file(file_path: str, data: list, mode: str = 'w'):
-    with lock:
-        with open(file_path, mode, newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(data)
-
-
-def extract_csv_data(state_filter: list, input_file: str = 'input/USZipCodesXLS.csv',
-                     output_file: str = 'output/Kroger-US-Full.csv') -> dict:
-    input_df = pd.read_csv(input_file)
-    output_df = pd.read_csv(output_file)
-    existing_postal_codes = output_df['ZipCode'].to_list()
-
-    csv_data = input_df[((~input_df['ID'].isin(existing_postal_codes))
-                         & (input_df['RG_NAME'].isin(state_filter)))].to_dict(orient='records')
-    print(f'{len(existing_postal_codes)} postal codes filtered out')
-
-    return csv_data
-
-
-def process_data(details: dict, output_file: str = 'output/Kroger-US-Full.csv'):
-    postal_code = postal_code_formatter(details.get('ID', None))
-    raw_data = download_data(postal_code)
-
-    if raw_data:
-        data = transform_data(details, raw_data)
-        write_to_file(output_file, data, 'a')
-        print(f"Written to file: {postal_code}")
-
-        delay = random.randint(5, 15)
-        print(f'Delaying for {delay} seconds.')
-        time.sleep(delay)
-    else:
-        logging.error(f"Process failed: {details['ID']}")
-
-
-def initialize_output_file(filename: str = 'output/Kroger-US-Full.csv'):
-    if not os.path.exists('output'):
-        os.mkdir('output')
-
-    initial_file = pd.DataFrame(columns=['Ecommerce', 'CityName', 'StateAbbrev', 'ZipCode', 'Delivery',
-                                         'DeliveryGrocery', 'DeliveryRestaurants', 'DeliveryAll', 'Pickup',
-                                         'PickupGrocery', 'PickupRestaurants', 'PickupAll'])
-    initial_file.to_csv(filename, mode='w', index=False)
-
-
-def main():
-    initialize_output_file()
-    csv_data = extract_csv_data(state_filter=['Hawaii'])  # Add filter option to specify which states to scrape.
-
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        for row in csv_data:
-            executor.submit(process_data, row, 'output/Kroger-US-Full.csv')
-            time.sleep(random.randint(1, 3))
-
-
-def test():
-    initialize_output_file('output/test_output.csv')
-    test_row = {
-        'OBJECTID': 11212,
-        'ID': 36804,
-        'NAME': 'Opelika',
-        'RG_NAME': 'Alabama	',
-        'RG_ABBREV': 'AL',
-    }
-
-    process_data(test_row, 'output/test_output.csv')
+        return postal_code
 
 
 if __name__ == '__main__':
-    main()
+    postal_code_input_file = 'input/USZipCodesXLS.csv'
+    store_input_file = 'input/Kroger-Store-List.csv'
+    output = 'output/Kroger-US-Full.csv'
+
+    log_file = f"logs/{datetime.today().strftime('%Y-%m-%d')}.log"
+    logger: Logger = initialize_logger('KrogerScraper', log_file)
+
+    scraper = KrogerScraper(postal_code_input_file, store_input_file, output, logger)
+    scraper.run()
