@@ -6,7 +6,5 @@ __pycache__/
 input/
 backup_data/
 
-change_state_name.py
-concatenator.py
+old_main.py
 free_proxy_list.py
-postprocessor.py
