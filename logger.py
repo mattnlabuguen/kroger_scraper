@@ -16,7 +16,7 @@ def initialize_logger(class_name, log_file):
     console_handler.setLevel(logging.DEBUG)
 
     # Formatter for the handlers
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('[%(asctime)s] - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
 

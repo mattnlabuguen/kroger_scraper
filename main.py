@@ -19,7 +19,7 @@ max_retries = 3
 max_workers = 12
 retry_delay_range = (5, 15)
 worker_delay_range = (1, 3)
-timeout_range = (10, 100)
+timeout_range = (10, 1000)
 user_agent = UserAgent(browsers=['edge', 'chrome', 'safari'])
 output_columns = ['Ecommerce', 'CityName', 'StateAbbrev', 'ZipCode', 'Delivery',
                   'DeliveryGrocery', 'DeliveryRestaurants', 'DeliveryAll', 'Pickup',
@@ -61,10 +61,10 @@ class KrogerScraper:
                     self.initialize_output_file()
 
     def run(self):
-        filtered_postal_code_list = self.filter_postal_codes()
+        filtered_postal_code_list = self._filter_postal_codes()
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for postal_code_details in filtered_postal_code_list:
-                executor.submit(self.process_postal_code, postal_code_details)
+                executor.submit(self._process_postal_code, postal_code_details)
                 worker_delay = random.randint(worker_delay_range[0], worker_delay_range[1])
                 time.sleep(worker_delay)
 
@@ -72,29 +72,29 @@ class KrogerScraper:
         if postal_code:  # For testing individual postal codes.
             postal_df = self.postal_code_data
             postal_code_details = postal_df.loc[postal_df['ID'] == postal_code].to_dict(orient='records')[0]
-            self.process_postal_code(postal_code_details)
+            self._process_postal_code(postal_code_details)
         else:
-            filtered_postal_code_list = self.filter_postal_codes(state_filter=['California'])
+            filtered_postal_code_list = self._filter_postal_codes(state_filter=['California'])
             for postal_code_details in filtered_postal_code_list:
-                self.process_postal_code(postal_code_details)
+                self._process_postal_code(postal_code_details)
 
     def initialize_output_file(self):
         initial_file = pd.DataFrame(columns=output_columns)
         initial_file.to_csv(self.output_file, mode='w', index=False)
 
-    def process_postal_code(self, postal_code_details: dict):
+    def _process_postal_code(self, postal_code_details: dict):
         postal_code = self.postal_code_formatter(postal_code_details.get('ID', None))
-        kroger_postal_data = self.download_data(postal_code)
+        kroger_postal_data = self._download_data(postal_code)
 
         if kroger_postal_data:
-            transformed_data = self.transform_data(kroger_postal_data, postal_code_details)
+            transformed_data = self._transform_data(kroger_postal_data, postal_code_details)
             self.write_to_file(self.output_file, transformed_data, 'a')
 
             delay = random.randint(5, 15)
             self.logger.info(f'Delaying for {delay} seconds.')
             time.sleep(delay)
 
-    def filter_postal_codes(self, state_filter=None) -> dict:
+    def _filter_postal_codes(self, state_filter=None) -> dict:
         postal_code_data = self.postal_code_data
         if state_filter is None or not state_filter:
             state_filter = state_list
@@ -110,7 +110,7 @@ class KrogerScraper:
         self.logger.info(f'{len(existing_postal_codes)} postal codes filtered out')
         return filtered_data
 
-    def download_data(self, postal_code: str, retries: int = 0) -> dict:
+    def _download_data(self, postal_code: str, retries: int = 0) -> dict:
         payload = {'address': {'postalCode': postal_code}}
         kroger_postal_data = None
 
@@ -132,7 +132,7 @@ class KrogerScraper:
                 retry_delay = random.randint(retry_delay_range[0], retry_delay_range[1])
                 self.logger.info(f'Delaying by {retry_delay} seconds before retrying for postal code {postal_code}')
                 time.sleep(retry_delay)
-                kroger_postal_data = self.download_data(postal_code, retries + 1)
+                kroger_postal_data = self._download_data(postal_code, retries + 1)
 
         except requests.exceptions.RequestException as e:
             self.logger.error(f'Error while processing postal code {postal_code}: {str(e)}')
@@ -143,7 +143,7 @@ class KrogerScraper:
         finally:
             return kroger_postal_data
 
-    def transform_data(self, kroger_postal_data: dict, postal_code_details: dict) -> list:
+    def _transform_data(self, kroger_postal_data: dict, postal_code_details: dict) -> list:
         output_data = {
             'Ecommerce': 'Kroger',
             'CityName': postal_code_details.get('NAME', None),
@@ -165,16 +165,16 @@ class KrogerScraper:
                 output_data.update(self.check_modality_options(modality_options))
 
                 if output_data['Delivery'] == 'Yes':
-                    delivery_store_brands = self.get_store_brands(modality_options, 'Delivery')
+                    delivery_store_brands = self._get_store_brands(modality_options, 'Delivery')
                     output_data.update(dict.fromkeys(['DeliveryGrocery', 'DeliveryAll'], delivery_store_brands))
 
                 if output_data['Pickup'] == 'Yes':
-                    pickup_store_brands = self.get_store_brands(modality_options, 'Pickup')
+                    pickup_store_brands = self._get_store_brands(modality_options, 'Pickup')
                     output_data.update(dict.fromkeys(['PickupGrocery', 'PickupAll'], pickup_store_brands))
 
         return list(output_data.values())
 
-    def get_store_brands(self, modality_options: dict, mode: str) -> list:
+    def _get_store_brands(self, modality_options: dict, mode: str) -> list:
         store_brands = []
         store_ids = []
         store_df = self.store_data
